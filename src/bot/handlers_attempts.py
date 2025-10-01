@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
 from typing import Dict
 
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, PollAnswer
+from aiogram.types import Message, PollAnswer, CallbackQuery
 from aiogram import Bot
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.db.session import get_session_factory
 from src.db.repo import QuizRepo, AttemptRepo
@@ -52,6 +53,7 @@ async def start_with_payload(message: Message, bot: Bot):
         per_question_seconds = quiz.duration_minutes or 0
         _active_attempts[attempt.id] = {
             "quiz_id": qid,
+            "quiz_title": quiz.title,
             "user_id": message.from_user.id,
             "current_index": 0,
             "question_ids": [q.id for q in qs],
@@ -59,6 +61,7 @@ async def start_with_payload(message: Message, bot: Bot):
             "chat_id": message.chat.id,
             "per_q_secs": per_question_seconds,
             "pending_poll_id": None,
+            "paused": False,
         }
 
         await message.answer("Starting quiz. Good luck!")
@@ -68,6 +71,8 @@ async def start_with_payload(message: Message, bot: Bot):
 async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_factory):
     state = _active_attempts.get(attempt_id)
     if state is None:
+        return
+    if state.get("paused"):
         return
 
     idx = state["current_index"]
@@ -81,7 +86,6 @@ async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_f
         q = qs[idx]
         secs = state.get("per_q_secs", 0)
         timer_suffix = f" ⏳ {secs}s" if secs and secs > 0 else ""
-        # Use Telegram's native countdown with open_period (5..600)
         open_period = secs if isinstance(secs, int) and 5 <= secs <= 600 else None
         msg = await bot.send_poll(
             chat_id=chat_id,
@@ -97,19 +101,26 @@ async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_f
         state["last_question_id"] = q.id
         state["pending_poll_id"] = msg.poll.id if msg and msg.poll else None
 
-    # Fallback timeout to advance to the next question when the period expires (or if not supported)
     if state.get("per_q_secs", 0) > 0:
-        import asyncio
 
-        async def timeout_and_next(expected_qid: int):
+        async def timeout_and_pause(expected_qid: int):
             await asyncio.sleep(state["per_q_secs"] + 1)
             st = _active_attempts.get(attempt_id)
             if not st or st.get("last_question_id") != expected_qid:
                 return
-            st["current_index"] += 1
-            await _send_next_question(bot, chat_id, attempt_id, session_factory)
+            # Pause instead of auto-advancing
+            st["paused"] = True
+            title = st.get("quiz_title", "Quiz")
+            kb = InlineKeyboardBuilder()
+            kb.button(text="▶️ Resume", callback_data=f"resume:{attempt_id}")
+            kb.button(text="⏹ Stop", callback_data=f"stop:{attempt_id}")
+            await bot.send_message(
+                chat_id,
+                f"⏸ The quiz '{title}' was paused because you stopped answering.",
+                reply_markup=kb.as_markup(),
+            )
 
-        asyncio.create_task(timeout_and_next(q.id))
+        asyncio.create_task(timeout_and_pause(q.id))
 
 
 @router.poll_answer()
@@ -126,6 +137,9 @@ async def on_poll_answer(pa: PollAnswer, bot: Bot):
     chat_id = state.get("chat_id")
     if chat_id is None:
         return
+    if state.get("paused"):
+        # ignore late answers during paused state
+        return
     session_factory = get_session_factory()
     async with session_factory() as session:
         qrepo = QuizRepo(session)
@@ -138,17 +152,41 @@ async def on_poll_answer(pa: PollAnswer, bot: Bot):
         is_correct = chosen == q.correct_index
         await arepo.upsert_answer(attempt_id, q.id, chosen, is_correct)
         await session.commit()
-        # Only short feedback; full answer via poll explanation
         if is_correct:
             await bot.send_message(chat_id, "Correct ✅")
         else:
             await bot.send_message(chat_id, "Incorrect ❌")
-        if q.reference:
-            await bot.send_message(chat_id, "📎 Explanation in poll.")
         if is_correct:
             state["score"] += 1
         state["current_index"] += 1
     await _send_next_question(bot, chat_id, attempt_id, session_factory)
+
+
+@router.callback_query(F.data.startswith("resume:"))
+async def resume_quiz(cb: CallbackQuery, bot: Bot):
+    attempt_id = int(cb.data.split(":", 1)[1])
+    st = _active_attempts.get(attempt_id)
+    if not st or st.get("user_id") != cb.from_user.id:
+        await cb.answer()
+        return
+    st["paused"] = False
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer("Resuming…")
+    await _send_next_question(
+        bot, cb.message.chat.id, attempt_id, get_session_factory()
+    )
+
+
+@router.callback_query(F.data.startswith("stop:"))
+async def stop_quiz(cb: CallbackQuery, bot: Bot):
+    attempt_id = int(cb.data.split(":", 1)[1])
+    st = _active_attempts.get(attempt_id)
+    if not st or st.get("user_id") != cb.from_user.id:
+        await cb.answer()
+        return
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer("Stopped.")
+    await _finish_attempt(bot, cb.message.chat.id, attempt_id, get_session_factory())
 
 
 async def _finish_attempt(
