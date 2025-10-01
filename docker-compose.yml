@@ -1,0 +1,32 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./data.db}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_USERNAME=${BOT_USERNAME}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - PORT=${PORT:-8080}
+      - RATE_LIMIT_CREATE_PER_HOUR=${RATE_LIMIT_CREATE_PER_HOUR:-10}
+      - ADMINS=${ADMINS}
+    volumes:
+      - ./:/app
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+# Optional Postgres service example
+#  db:
+#    image: postgres:16
+#    environment:
+#      POSTGRES_PASSWORD: postgres
+#      POSTGRES_USER: postgres
+#      POSTGRES_DB: quizbot
+#    ports:
+#      - "5432:5432"
+#    volumes:
+#      - pgdata:/var/lib/postgresql/data
+#volumes:
+#  pgdata:
