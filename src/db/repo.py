@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, List, Tuple, Dict
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.models import Quiz, Question, Attempt, Answer, AllowedUser
@@ -10,7 +10,14 @@ class QuizRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create_quiz(self, creator_id: int, title: str, description: str | None, duration_minutes: int, public_flag: bool) -> Quiz:
+    async def create_quiz(
+        self,
+        creator_id: int,
+        title: str,
+        description: str | None,
+        duration_minutes: int,
+        public_flag: bool,
+    ) -> Quiz:
         quiz = Quiz(
             creator_id=creator_id,
             title=title,
@@ -22,7 +29,9 @@ class QuizRepo:
         await self.session.flush()
         return quiz
 
-    async def add_questions(self, quiz_id: int, questions: Sequence[dict]) -> list[Question]:
+    async def add_questions(
+        self, quiz_id: int, questions: Sequence[dict]
+    ) -> list[Question]:
         created: list[Question] = []
         for idx, q in enumerate(questions):
             qrow = Question(
@@ -43,11 +52,19 @@ class QuizRepo:
         return res.scalar_one_or_none()
 
     async def get_questions(self, quiz_id: int) -> list[Question]:
-        res = await self.session.execute(select(Question).where(Question.quiz_id == quiz_id).order_by(Question.index.asc()))
+        res = await self.session.execute(
+            select(Question)
+            .where(Question.quiz_id == quiz_id)
+            .order_by(Question.index.asc())
+        )
         return list(res.scalars())
 
     async def list_user_quizzes(self, creator_id: int) -> list[Quiz]:
-        res = await self.session.execute(select(Quiz).where(Quiz.creator_id == creator_id).order_by(Quiz.created_at.desc()))
+        res = await self.session.execute(
+            select(Quiz)
+            .where(Quiz.creator_id == creator_id)
+            .order_by(Quiz.created_at.desc())
+        )
         return list(res.scalars())
 
     async def add_allowed_users(self, quiz_id: int, user_ids: Sequence[int]) -> None:
@@ -57,7 +74,9 @@ class QuizRepo:
 
     async def is_user_allowed(self, quiz_id: int, user_id: int) -> bool:
         res = await self.session.execute(
-            select(AllowedUser).where(AllowedUser.quiz_id == quiz_id, AllowedUser.user_id == user_id)
+            select(AllowedUser).where(
+                AllowedUser.quiz_id == quiz_id, AllowedUser.user_id == user_id
+            )
         )
         return res.scalar_one_or_none() is not None
 
@@ -80,26 +99,90 @@ class AttemptRepo:
         await self.session.flush()
         return attempt
 
+    async def get_attempt(self, attempt_id: int) -> Attempt | None:
+        res = await self.session.execute(
+            select(Attempt).where(Attempt.id == attempt_id)
+        )
+        return res.scalar_one_or_none()
+
     async def finish_attempt(self, attempt_id: int, score: int) -> None:
-        from sqlalchemy import select
-        from src.db.models import Attempt as AttemptModel
-        res = await self.session.execute(select(AttemptModel).where(AttemptModel.id == attempt_id))
+        res = await self.session.execute(
+            select(Attempt).where(Attempt.id == attempt_id)
+        )
         att = res.scalar_one()
         att.score = score
         from datetime import datetime
+
         att.finished_at = datetime.utcnow()
         await self.session.flush()
 
-    async def upsert_answer(self, attempt_id: int, question_id: int, chosen_index: int, is_correct: bool) -> None:
-        await self.session.execute(delete(Answer).where(Answer.attempt_id == attempt_id, Answer.question_id == question_id))
-        self.session.add(Answer(
-            attempt_id=attempt_id,
-            question_id=question_id,
-            chosen_index=chosen_index,
-            is_correct=is_correct,
-        ))
+    async def upsert_answer(
+        self, attempt_id: int, question_id: int, chosen_index: int, is_correct: bool
+    ) -> None:
+        await self.session.execute(
+            delete(Answer).where(
+                Answer.attempt_id == attempt_id, Answer.question_id == question_id
+            )
+        )
+        self.session.add(
+            Answer(
+                attempt_id=attempt_id,
+                question_id=question_id,
+                chosen_index=chosen_index,
+                is_correct=is_correct,
+            )
+        )
         await self.session.flush()
 
     async def get_answers(self, attempt_id: int) -> list[Answer]:
-        res = await self.session.execute(select(Answer).where(Answer.attempt_id == attempt_id))
+        res = await self.session.execute(
+            select(Answer).where(Answer.attempt_id == attempt_id)
+        )
         return list(res.scalars())
+
+    async def get_attempt_stats(
+        self, attempt_id: int, total_questions: int
+    ) -> tuple[int, int, int]:
+        # returns (correct, wrong, missed)
+        res = await self.session.execute(
+            select(Answer).where(Answer.attempt_id == attempt_id)
+        )
+        answers = list(res.scalars())
+        correct = sum(1 for a in answers if a.is_correct)
+        wrong = len(answers) - correct
+        missed = max(0, total_questions - len(answers))
+        return correct, wrong, missed
+
+    async def get_user_latest_finished(
+        self, quiz_id: int, user_id: int
+    ) -> Attempt | None:
+        res = await self.session.execute(
+            select(Attempt)
+            .where(
+                Attempt.quiz_id == quiz_id,
+                Attempt.user_id == user_id,
+                Attempt.finished_at.is_not(None),
+            )
+            .order_by(Attempt.finished_at.desc())
+        )
+        return res.scalars().first()
+
+    async def leaderboard_first_attempts(self, quiz_id: int) -> list[Attempt]:
+        res = await self.session.execute(
+            select(Attempt)
+            .where(Attempt.quiz_id == quiz_id, Attempt.finished_at.is_not(None))
+            .order_by(Attempt.finished_at.asc())
+        )
+        attempts = list(res.scalars())
+        first_per_user: Dict[int, Attempt] = {}
+        for att in attempts:
+            if att.user_id not in first_per_user:
+                first_per_user[att.user_id] = att
+
+        # sort by score desc then duration asc
+        def duration(a: Attempt) -> float:
+            if a.finished_at and a.started_at:
+                return (a.finished_at - a.started_at).total_seconds()
+            return float("inf")
+
+        return sorted(first_per_user.values(), key=lambda a: (-a.score, duration(a)))

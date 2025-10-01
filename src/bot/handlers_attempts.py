@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Dict
 
 from aiogram import Router, F
@@ -47,6 +48,36 @@ async def start_with_payload(message: Message, bot: Bot):
         if len(qs) == 0:
             await message.answer("Quiz has no questions.")
             return
+
+        # Show prior finished attempt stats if any
+        prior = await arepo.get_user_latest_finished(qid, message.from_user.id)
+        if prior:
+            correct, wrong, missed = await arepo.get_attempt_stats(prior.id, len(qs))
+            leaderboard = await arepo.leaderboard_first_attempts(qid)
+            placement = None
+            for idx, att in enumerate(leaderboard, start=1):
+                if att.user_id == message.from_user.id and att.id == prior.id:
+                    placement = idx
+                    break
+            total_attempts = len(leaderboard)
+            place_line = (
+                f"{placement}th place out of {total_attempts}."
+                if placement
+                else f"Out of {total_attempts}."
+            )
+            await message.answer(
+                (
+                    f"🎲 Quiz '{quiz.title}'\n\n"
+                    f"You already took this quiz. Your result on the leaderboard:\n\n"
+                    f"✅ Correct – {correct}\n"
+                    f"❌ Wrong – {wrong}\n"
+                    f"⌛️ Missed – {missed}\n"
+                    f"⏱ {(prior.finished_at - prior.started_at).total_seconds():.1f} sec\n\n"
+                    f"{place_line}\n\n"
+                    f"You can take this quiz again but it will not change your place on the leaderboard"
+                )
+            )
+
         attempt = await arepo.create_attempt(qid, message.from_user.id)
         await session.commit()
 
@@ -62,6 +93,9 @@ async def start_with_payload(message: Message, bot: Bot):
             "per_q_secs": per_question_seconds,
             "pending_poll_id": None,
             "paused": False,
+            "started_at": datetime.utcnow(),
+            "correct": 0,
+            "wrong": 0,
         }
 
         await message.answer("Starting quiz. Good luck!")
@@ -70,9 +104,7 @@ async def start_with_payload(message: Message, bot: Bot):
 
 async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_factory):
     state = _active_attempts.get(attempt_id)
-    if state is None:
-        return
-    if state.get("paused"):
+    if state is None or state.get("paused"):
         return
 
     idx = state["current_index"]
@@ -108,7 +140,6 @@ async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_f
             st = _active_attempts.get(attempt_id)
             if not st or st.get("last_question_id") != expected_qid:
                 return
-            # Pause instead of auto-advancing
             st["paused"] = True
             title = st.get("quiz_title", "Quiz")
             kb = InlineKeyboardBuilder()
@@ -135,10 +166,7 @@ async def on_poll_answer(pa: PollAnswer, bot: Bot):
         return
     state = _active_attempts[attempt_id]
     chat_id = state.get("chat_id")
-    if chat_id is None:
-        return
-    if state.get("paused"):
-        # ignore late answers during paused state
+    if chat_id is None or state.get("paused"):
         return
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -154,10 +182,11 @@ async def on_poll_answer(pa: PollAnswer, bot: Bot):
         await session.commit()
         if is_correct:
             await bot.send_message(chat_id, "Correct ✅")
+            state["score"] += 1
+            state["correct"] += 1
         else:
             await bot.send_message(chat_id, "Incorrect ❌")
-        if is_correct:
-            state["score"] += 1
+            state["wrong"] += 1
         state["current_index"] += 1
     await _send_next_question(bot, chat_id, attempt_id, session_factory)
 
@@ -195,12 +224,40 @@ async def _finish_attempt(
     state = _active_attempts.get(attempt_id)
     if state is None:
         return
-    score = state.get("score", 0)
     total = len(state.get("question_ids", []))
-    percent = (score * 100) // total if total else 0
+    correct = state.get("correct", 0)
+    wrong = state.get("wrong", 0)
+    missed = max(0, total - (correct + wrong))
+    duration_sec = max(
+        1, int((datetime.utcnow() - state.get("started_at")).total_seconds())
+    )
     async with session_factory() as session:
         arepo = AttemptRepo(session)
-        await arepo.finish_attempt(attempt_id, score)
+        await arepo.finish_attempt(attempt_id, correct)
         await session.commit()
-    await bot.send_message(chat_id, f"Finished! Score: {score}/{total} ({percent}%).")
+        leaderboard = await arepo.leaderboard_first_attempts(state["quiz_id"])
+        placement = None
+        for idx, att in enumerate(leaderboard, start=1):
+            if att.id == attempt_id:
+                placement = idx
+                break
+        total_attempts = len(leaderboard)
+    title = state.get("quiz_title", "Quiz")
+    place_line = (
+        f"{placement}th place out of {total_attempts}."
+        if placement
+        else f"Out of {total_attempts}."
+    )
+    await bot.send_message(
+        chat_id,
+        (
+            f"🎲 Quiz '{title}'\n\n"
+            f"Your result on the leaderboard:\n\n"
+            f"✅ Correct – {correct}\n"
+            f"❌ Wrong – {wrong}\n"
+            f"⌛️ Missed – {missed}\n"
+            f"⏱ {duration_sec:.1f} sec\n\n"
+            f"{place_line}"
+        ),
+    )
     _active_attempts.pop(attempt_id, None)
