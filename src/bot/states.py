@@ -17,3 +17,12 @@ class AttemptStates(StatesGroup):
     idle = State()
     in_progress = State()
     finished = State()
+
+
+class NewPollsStates(StatesGroup):
+    waiting_poll_type = State()
+    waiting_anonymous = State()
+    waiting_mode = State()
+    waiting_single_question = State()
+    waiting_bulk_content = State()
+    waiting_bulk_confirm = State()

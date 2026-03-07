@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 from pydantic import BaseModel
 
 
@@ -13,6 +14,7 @@ class Settings(BaseModel):
 
     @classmethod
     def load(cls) -> "Settings":
+        load_dotenv()
         token = os.getenv("BOT_TOKEN", "").strip()
         if not token:
             raise RuntimeError("BOT_TOKEN is required")

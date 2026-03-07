@@ -9,13 +9,16 @@ from rapidfuzz import fuzz
 
 # Require a delimiter immediately after the single-letter/number marker to avoid matching "Ans:" or "Ref:"
 CHOICE_RE = re.compile(r"^\s*[\(\[]?([A-Za-z0-9])[\)\].:\-]\s*(.+)$", re.IGNORECASE)
+# "Ans" is required; separator between "Ans" and the letter can be " - ", ":", "-", or just a space
 ANS_RE = re.compile(
-    r"^\s*(?:Ans(?:wer)?[:\-]?\s*)?([A-Za-z0-9])(?:\)|\.)?\s*(?::|\-|\)|\.)?\s*(.*)$",
+    r"^\s*Ans(?:wer)?\s*[\-:]?\s*([A-Za-z0-9])(?:\)|\.)?\s*(?::|\-|\)|\.)?\s*(.*)$",
     re.IGNORECASE,
 )
-REF_RE = re.compile(r"^\s*(?:Ref(?:erence)?[:\-]?)\s*(.+)$", re.IGNORECASE)
+# Separator between "Ref/Reference" and the value can be " - ", ":", "-", or just a space
+REF_RE = re.compile(r"^\s*Ref(?:erence)?\s*[\-:]?\s*(.+)$", re.IGNORECASE)
 Q_START_RE = re.compile(r"^(?:Q(?:\d+)?[.\-)\s]*)(.*)$", re.IGNORECASE)
 Q_SPLIT_RE = re.compile(r"(?mi)^Q(?:\d+)?[.\-)]")
+CHANNEL_TAG_RE = re.compile(r"^@\S+")
 
 
 @dataclass
@@ -69,7 +72,7 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
     original = block
     block = normalize_text(block)
     block = truncate_redundant_block(block)
-    lines = [l.strip() for l in block.splitlines() if l.strip()]
+    lines = [l.strip() for l in block.splitlines() if l.strip() and not CHANNEL_TAG_RE.match(l.strip())]
     if not lines:
         return None, ParseError("Empty block", original)
 

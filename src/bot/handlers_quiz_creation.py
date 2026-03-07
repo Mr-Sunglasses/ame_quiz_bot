@@ -229,9 +229,11 @@ async def confirm_create(message: Message, state: FSMContext):
         await repo.add_questions(quiz.id, data.get("questions", []))
         await session.commit()
         link = f"https://t.me/{settings.bot_username}?start=quiz_{quiz.id}"
+        link_group = f"https://t.me/{settings.bot_username}?startgroup=quiz_{quiz.id}"
         kb = InlineKeyboardBuilder()
         kb.button(text="Share link", url=link)
         kb.button(text="Start quiz", url=link)
+        kb.button(text="Start in group", url=link_group)
         await message.answer(
             f"Quiz created!\nTitle: {quiz.title}\nQuestions: {len(data.get('questions', []))}\nPer-question: {data.get('duration_minutes')}s\nLink: {link}",
             reply_markup=kb.as_markup(),

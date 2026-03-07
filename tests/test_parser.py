@@ -1,5 +1,28 @@
-import pytest
 from src.parser.quiz_parser import parse_single_block, parse_bulk
+
+
+def test_parse_channel_tag_format():
+    block = (
+        "@aiapgetmadeeasy\n"
+        "Q. अलङ्कृता रूपवती सुभगा कामरूपिणी is  ---\n"
+        "as per सुश्रुत\n"
+        "\n"
+        "(A) रेवती\n"
+        "(B) शकुनि\n"
+        "(C) मुखमण्डिका\n"
+        "(D) पूतना\n"
+        "\n"
+        "Ans - C\n"
+        "\n"
+        "Reference - su.ut.35\n"
+    )
+    pq, err = parse_single_block(block)
+    assert err is None, f"Unexpected error: {err}"
+    assert pq is not None
+    assert pq.correct_index == 2  # C → index 2
+    assert pq.reference == "su.ut.35"
+    assert len(pq.options) == 4
+    assert "सुश्रुत" in pq.text  # multi-line question text is joined
 
 
 def test_parse_single_format_variant_a():
