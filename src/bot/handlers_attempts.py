@@ -162,6 +162,8 @@ async def _group_next(bot: Bot, key: Tuple[int, int], session_factory):
         secs = st.get("per_q_secs", 0)
         timer_suffix = f" ⏳ {secs}s" if secs and secs > 0 else ""
         open_period = secs if isinstance(secs, int) and 5 <= secs <= 600 else None
+        if q.pretext:
+            await bot.send_message(chat_id=st["chat_id"], text=q.pretext)
         msg = await bot.send_poll(
             chat_id=st["chat_id"],
             question=(q.text[:280] + timer_suffix),
@@ -317,6 +319,8 @@ async def _send_next_question(bot: Bot, chat_id: int, attempt_id: int, session_f
         secs = state.get("per_q_secs", 0)
         timer_suffix = f" ⏳ {secs}s" if secs and secs > 0 else ""
         open_period = secs if isinstance(secs, int) and 5 <= secs <= 600 else None
+        if q.pretext:
+            await bot.send_message(chat_id=chat_id, text=q.pretext)
         msg = await bot.send_poll(
             chat_id=chat_id,
             question=(q.text[:280] + timer_suffix),

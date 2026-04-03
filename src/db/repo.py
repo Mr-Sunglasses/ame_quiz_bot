@@ -38,6 +38,7 @@ class QuizRepo:
                 quiz_id=quiz_id,
                 index=idx,
                 text=q["text"],
+                pretext=q.get("pretext"),
                 options=q["options"],
                 correct_index=q["correct_index"],
                 reference=q.get("reference"),

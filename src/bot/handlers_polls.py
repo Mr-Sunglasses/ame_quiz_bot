@@ -148,6 +148,8 @@ async def polls_bulk_confirm(message: Message, state: FSMContext, bot: Bot):
 async def _send_poll(
     bot: Bot, chat_id: int, pq: ParsedQuestion, is_quiz: bool, is_anonymous: bool
 ) -> None:
+    if pq.pretext:
+        await bot.send_message(chat_id=chat_id, text=pq.pretext)
     if is_quiz:
         await bot.send_poll(
             chat_id=chat_id,
@@ -174,6 +176,7 @@ def _pq_to_dict(pq: ParsedQuestion) -> dict:
         "options": pq.options,
         "correct_index": pq.correct_index,
         "reference": pq.reference,
+        "pretext": pq.pretext,
     }
 
 
@@ -183,4 +186,5 @@ def _dict_to_pq(d: dict) -> ParsedQuestion:
         options=d["options"],
         correct_index=d["correct_index"],
         reference=d.get("reference"),
+        pretext=d.get("pretext"),
     )

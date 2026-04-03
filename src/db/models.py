@@ -33,6 +33,7 @@ class Question(Base):
     )
     index: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
+    pretext: Mapped[str | None] = mapped_column(Text, nullable=True)
     options: Mapped[list[str]] = mapped_column(JSON)
     correct_index: Mapped[int] = mapped_column(Integer)
     reference: Mapped[str | None] = mapped_column(Text, nullable=True)

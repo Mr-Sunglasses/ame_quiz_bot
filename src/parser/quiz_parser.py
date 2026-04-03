@@ -7,18 +7,19 @@ from typing import List, Tuple
 from rapidfuzz import fuzz
 
 
-# Require a delimiter immediately after the single-letter/number marker to avoid matching "Ans:" or "Ref:"
 CHOICE_RE = re.compile(r"^\s*[\(\[]?([A-Za-z0-9])[\)\].:\-]\s*(.+)$", re.IGNORECASE)
-# "Ans" is required; separator between "Ans" and the letter can be " - ", ":", "-", or just a space
 ANS_RE = re.compile(
     r"^\s*Ans(?:wer)?\s*[\-:]?\s*([A-Za-z0-9])(?:\)|\.)?\s*(?::|\-|\)|\.)?\s*(.*)$",
     re.IGNORECASE,
 )
-# Separator between "Ref/Reference" and the value can be " - ", ":", "-", or just a space
 REF_RE = re.compile(r"^\s*Ref(?:erence)?\s*[\-:]?\s*(.+)$", re.IGNORECASE)
 Q_START_RE = re.compile(r"^(?:Q(?:\d+)?[.\-)\s]*)(.*)$", re.IGNORECASE)
 Q_SPLIT_RE = re.compile(r"(?mi)^Q(?:\d+)?[.\-)]")
 CHANNEL_TAG_RE = re.compile(r"^@\S+")
+MATCH_PAIR_LINE_RE = re.compile(
+    r"^\d+\s*[).\-:]\s+\S.*\s+[a-zA-Z]\s*[).\-:]\s+\S"
+)
+_FIRST_CHOICE_RE = re.compile(r"^\s*[\(\[]?\s*A\s*[\)\].:\-]", re.IGNORECASE)
 
 
 @dataclass
@@ -27,6 +28,7 @@ class ParsedQuestion:
     options: List[str]
     correct_index: int
     reference: str | None = None
+    pretext: str | None = None
 
 
 @dataclass
@@ -49,23 +51,109 @@ def truncate_redundant_block(content: str) -> str:
     return content
 
 
-def split_bulk(content: str) -> List[str]:
-    content = normalize_text(content)
-    parts = re.split(r"\n\s*\n|\n?---\n?", content)
-    parts = [p.strip() for p in parts if p.strip()]
-    if len(parts) > 1:
-        return parts
-    blob = parts[0] if parts else content
-    q_positions = [m.start() for m in Q_SPLIT_RE.finditer(blob)]
-    if not q_positions:
-        return [blob] if blob.strip() else []
+def _chunk_has_answer(chunk: str) -> bool:
+    for line in chunk.splitlines():
+        if line.strip().lower().startswith("ans"):
+            return True
+    return False
+
+
+def _split_by_answer_boundaries(text: str) -> List[str]:
+    lines = text.split("\n")
+    boundaries: List[int] = [0]
+    state = "collecting"
+    last_ref_idx = -1
+
+    for idx, line in enumerate(lines):
+        s = line.strip().lower()
+        if state == "collecting":
+            if s.startswith("ans"):
+                state = "ans_seen"
+            elif Q_SPLIT_RE.match(line.strip()):
+                if idx > 0:
+                    boundaries.append(idx)
+        elif state == "ans_seen":
+            if s.startswith("ref"):
+                state = "ref_seen"
+                last_ref_idx = idx
+            elif Q_SPLIT_RE.match(line.strip()):
+                boundaries.append(idx)
+                state = "collecting"
+            elif _FIRST_CHOICE_RE.match(s):
+                boundaries.append(idx)
+                state = "collecting"
+            elif s and len(s) <= 2 and s.replace(".", "").replace("-", "").isalpha():
+                pass
+        elif state == "ref_seen":
+            if s.startswith("ref"):
+                last_ref_idx = idx
+            else:
+                boundaries.append(idx)
+                state = "collecting"
+
+    if len(boundaries) <= 1:
+        return [text]
     chunks: List[str] = []
-    for i, pos in enumerate(q_positions):
-        end = q_positions[i + 1] if i + 1 < len(q_positions) else len(blob)
-        chunk = blob[pos:end].strip()
+    for i, start in enumerate(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(lines)
+        chunk = "\n".join(lines[start:end]).strip()
         if chunk:
             chunks.append(chunk)
     return chunks
+
+
+def split_bulk(content: str) -> List[str]:
+    content = normalize_text(content)
+    parts = re.split(r"\n\s*\n|\n---[ \t]*\n", content)
+    parts = [p.strip() for p in parts if p.strip()]
+    if not parts:
+        return []
+
+    if len(parts) > 1:
+        merged: List[str] = [parts[0]]
+        for part in parts[1:]:
+            first_line = part.split("\n", 1)[0].strip()
+            low = first_line.lower()
+            if low.startswith("ans") or low.startswith("ref"):
+                merged[-1] += "\n" + part
+            elif MATCH_PAIR_LINE_RE.match(first_line):
+                merged[-1] += "\n" + part
+            else:
+                fl_m = CHOICE_RE.match(first_line)
+                if fl_m and not _chunk_has_answer(merged[-1]):
+                    merged[-1] += "\n" + part
+                else:
+                    merged.append(part)
+    else:
+        blob = parts[0]
+        q_positions = [m.start() for m in Q_SPLIT_RE.finditer(blob)]
+        if q_positions:
+            merged = []
+            for i, pos in enumerate(q_positions):
+                end = q_positions[i + 1] if i + 1 < len(q_positions) else len(blob)
+                chunk = blob[pos:end].strip()
+                if chunk:
+                    merged.append(chunk)
+        else:
+            merged = [blob]
+
+    final: List[str] = []
+    for chunk in merged:
+        sub = _split_by_answer_boundaries(chunk)
+        final.extend(sub)
+    return final
+
+
+def _find_letter_choice_start(lines: List[str], start_idx: int) -> int | None:
+    for idx in range(start_idx, len(lines)):
+        line = lines[idx]
+        low = line.lower()
+        if low.startswith("ans") or low.startswith("ref"):
+            break
+        m = CHOICE_RE.match(line)
+        if m and m.group(1).isalpha():
+            return idx
+    return None
 
 
 def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | None]:
@@ -80,6 +168,21 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
     options: List[str] = []
     correct_index: int | None = None
     reference: str | None = None
+    pretext: str | None = None
+
+    pretext_lines: List[str] = []
+    remaining_lines: List[str] = []
+    for line in lines:
+        if MATCH_PAIR_LINE_RE.match(line):
+            pretext_lines.append(line)
+        else:
+            remaining_lines.append(line)
+    if pretext_lines:
+        pretext = "\n".join(pretext_lines)
+        lines = remaining_lines
+
+    if not lines:
+        return None, ParseError("Empty block after pretext extraction", original)
 
     i = 0
     first = lines[0]
@@ -92,10 +195,17 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
         else:
             i = 1
 
+    letter_choice_idx = _find_letter_choice_start(lines, i)
+
     while i < len(lines):
         if Q_START_RE.match(lines[i]) and options:
             break
-        if CHOICE_RE.match(lines[i]):
+        m = CHOICE_RE.match(lines[i])
+        if m:
+            if m.group(1).isdigit() and letter_choice_idx is not None:
+                question_text_lines.append(lines[i])
+                i += 1
+                continue
             break
         if not question_text_lines and Q_START_RE.match(lines[i]):
             question_text_lines.append(Q_START_RE.match(lines[i]).group(1).strip())
@@ -105,14 +215,15 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
 
     while i < len(lines):
         line = lines[i]
-        # stop if answer or reference lines begin, or another question starts
         low = line.lower()
         if low.startswith("ans") or low.startswith("ref") or Q_START_RE.match(line):
             break
         m = CHOICE_RE.match(line)
         if not m:
-            # if a non-choice line encountered, stop collecting options
             break
+        if m.group(1).isdigit() and letter_choice_idx is not None:
+            i += 1
+            continue
         option_text = m.group(2).strip()
         options.append(option_text)
         i += 1
@@ -142,6 +253,14 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
             else:
                 if idx is not None and len(options) > 0:
                     correct_index = max(0, min(idx, len(options) - 1))
+        elif line.lower().startswith("ans") and correct_index is None:
+            for j in range(i + 1, min(i + 3, len(lines))):
+                nxt = lines[j].strip()
+                if len(nxt) == 1 and nxt.isalpha():
+                    idx = ord(nxt.lower()) - ord("a")
+                    if 0 <= idx < len(options):
+                        correct_index = idx
+                        break
         i += 1
 
     q_text_final = " ".join(question_text_lines).strip()
@@ -166,6 +285,7 @@ def parse_single_block(block: str) -> Tuple[ParsedQuestion | None, ParseError | 
             options=options,
             correct_index=correct_index,
             reference=reference,
+            pretext=pretext,
         ),
         None,
     )

@@ -110,6 +110,7 @@ async def _store_temp_question(state: FSMContext, pq: ParsedQuestion):
             "options": pq.options,
             "correct_index": pq.correct_index,
             "reference": pq.reference,
+            "pretext": pq.pretext,
         }
     )
     await state.update_data(questions=qs)
@@ -134,6 +135,7 @@ async def bulk_parse_command(message: Message, state: FSMContext):
                 "options": p.options,
                 "correct_index": p.correct_index,
                 "reference": p.reference,
+                "pretext": p.pretext,
             }
             for p in parsed
         ]

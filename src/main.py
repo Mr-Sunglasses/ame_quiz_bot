@@ -9,10 +9,22 @@ from src.db.models import Base
 from src.bot.routes import router as bot_router
 
 
+async def _migrate(conn) -> None:
+    from sqlalchemy import text, inspect
+
+    def do_migrate(sync_conn):
+        insp = inspect(sync_conn)
+        cols = [c["name"] for c in insp.get_columns("questions")]
+        if "pretext" not in cols:
+            sync_conn.execute(text("ALTER TABLE questions ADD COLUMN pretext TEXT"))
+    await conn.run_sync(do_migrate)
+
+
 async def init_db(settings: Settings) -> None:
     init_engine(settings.database_url)
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate(conn)
 
 
 async def run_long_polling(settings: Settings) -> None:
